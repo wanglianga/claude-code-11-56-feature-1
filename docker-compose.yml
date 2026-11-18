@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: faultref
+      POSTGRES_USER: faultref
+      POSTGRES_PASSWORD: faultref
+    volumes:
+      - faultref-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faultref -d faultref"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/faultref
+      DB_USER: faultref
+      DB_PASSWORD: faultref
+      APP_SECURITY_ENABLED: "true"
+      APP_DEMO_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+
+volumes:
+  faultref-db:
