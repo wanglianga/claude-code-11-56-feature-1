@@ -1,5 +1,6 @@
 package com.windfarm.faultref.web;
 
+import com.windfarm.faultref.repo.EvolutionRepo;
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.repo.ReleaseRepo;
 import com.windfarm.faultref.service.ReleaseService;
@@ -21,10 +22,12 @@ public class ReleaseController {
 
     private final ReleaseService releases;
     private final ReleaseRepo releaseRepo;
+    private final EvolutionRepo evolution;
 
-    public ReleaseController(ReleaseService releases, ReleaseRepo releaseRepo) {
+    public ReleaseController(ReleaseService releases, ReleaseRepo releaseRepo, EvolutionRepo evolution) {
         this.releases = releases;
         this.releaseRepo = releaseRepo;
+        this.evolution = evolution;
     }
 
     @Operation(summary = "Create a DRAFT release bound to a PUBLISHED catalog version and inventory snapshot")
@@ -78,6 +81,8 @@ public class ReleaseController {
         out.put("inventory", releaseRepo.inventory(id));
         out.put("dispositions", releaseRepo.dispositions(id));
         out.put("adjudications", releaseRepo.adjudications(id));
+        out.put("conceptHierarchy", evolution.releaseHierarchy(id));
+        out.put("conceptBridges", evolution.releaseBridges(id));
         return out;
     }
 

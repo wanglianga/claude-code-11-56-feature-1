@@ -3,6 +3,7 @@ package com.windfarm.faultref.web;
 import com.windfarm.faultref.repo.EvidenceRepo;
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.service.EvidenceService;
+import com.windfarm.faultref.service.EvolutionService;
 import com.windfarm.faultref.web.dto.ApiRequests;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -22,12 +23,14 @@ public class EvidenceController {
     private final EvidenceService evidenceService;
     private final EvidenceRepo evidenceRepo;
     private final ReferenceRepo reference;
+    private final EvolutionService evolution;
 
     public EvidenceController(EvidenceService evidenceService, EvidenceRepo evidenceRepo,
-                              ReferenceRepo reference) {
+                              ReferenceRepo reference, EvolutionService evolution) {
         this.evidenceService = evidenceService;
         this.evidenceRepo = evidenceRepo;
         this.reference = reference;
+        this.evolution = evolution;
     }
 
     @Operation(summary = "Ingest a controller alarm or a vendor-term alarm",
@@ -61,7 +64,7 @@ public class EvidenceController {
         return evidenceRepo.listWorkOrders();
     }
 
-    @Operation(summary = "Get a work order with its linked term and mapping history (historical explainability)")
+    @Operation(summary = "Get a work order with its linked term, mapping history and granularity links")
     @GetMapping("/work-orders/{id}")
     public Map<String, Object> workOrder(@PathVariable UUID id) {
         Map<String, Object> wo = ReferenceRepo.require(evidenceRepo.workOrderById(id),
@@ -71,6 +74,9 @@ public class EvidenceController {
         if (termId != null) {
             out.put("term", reference.termById(termId).orElse(null));
         }
+        // Reopened historical work orders keep their original diagnosis; these
+        // links only attach the new-granularity explanation.
+        out.put("granularityLinks", evolution.linksForWorkOrder(id));
         return out;
     }
 }

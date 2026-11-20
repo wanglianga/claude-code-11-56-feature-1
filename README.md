@@ -31,6 +31,14 @@
 
 诊断结论状态：`RESOLVED` / `CONFLICT` / `PENDING_ENGINEER` / `NO_MAPPING` / `NO_DISPOSITION`。
 
+7. **概念粒度演化可追溯、可连续比较**：厂商把一个"液压压力异常"在新固件拆成低压、压力波动、传感器失效三个细码后，
+   系统既不把旧记录伪装成细类，也不把新细类强行折回旧类，而是维护一份显式的粒度演化记录（见第 7.1 节）：
+   - 每个父子概念关系标注**固件适用范围、关系类型（SPLIT/MERGE/REFINE）、可逆/不可逆聚合与工程依据**；
+   - 跨版本统计必须声明它在比较**细分故障（FINE_GRAINED）、共同祖先概念（COMMON_ANCESTOR）还是无法连续比较（NOT_COMPARABLE）**；
+   - **固件证据缺失**的告警只显示"待归属（pending attribution）"，不进自动统计；
+   - 拆分发布后**重开的旧工单**仍引用原诊断，只追加一条到新粒度说明的关联；
+   - **没有工程定义的子码**（层级边未 APPROVED）不得进入自动统计。
+
 ---
 
 ## 2. 快速启动
@@ -92,6 +100,8 @@ DB_URL=jdbc:postgresql://127.0.0.1:5432/faultref \
 - **目录演化**：`CAT-2023.01 → CAT-2025.01 → CAT-2025.02`，配合 `INV-*` 库存快照，
   使同一概念在不同时点分别得到"确认可用 / 互斥待裁定 / 无可用件"。
 - **发布快照**：`REL-2025.01`、`REL-2025.02` 冻结全量内容并带 SHA-256 内容哈希。
+- **V3.0 粒度拆分（本特性）**：`NW-8 V3.0` 把液压压力异常拆为低压/波动/传感器失效三细码（+ 一个未定义子码），
+  配套已批准概念层级、桥接矩阵、缺固件证据待归属告警、重开工单关联与 `REL-2026.01` 演化冻结，详见 7.1。
 
 ---
 
@@ -105,7 +115,7 @@ createdb -h 127.0.0.1 -U ccdev faultref_test
 /opt/maven/bin/mvn test
 ```
 
-覆盖 24 个用例：
+覆盖 32 个用例：
 
 - `DiagnosisScenarioTest`（10）：固件改义、离线补传、迟到但非补传、保留冲突、作用域优先、
   工程师裁定、互斥处置、库存不足、运行期目录固定、同码不同机型。
@@ -113,17 +123,21 @@ createdb -h 127.0.0.1 -U ccdev faultref_test
   模式/口径校验、内容哈希确定性、发布后禁止再改目录。
 - `ApiContractTest`（8）：未认证 401、角色 403、校验错误结构、OpenAPI 公开、
   HTTP 运行诊断、补传时间校验。
+- `GranularityEvolutionTest`（8）：SPLIT 兄弟细码细级比较、旧粗类对新细类走共同祖先、无共同祖先判不可比较、
+  层级法保留细分分布并标记占比变化/不可逆聚合、桥接法稳定但掩盖细节并列出无桥接概念、
+  待归属告警不进统计且可解除、重开工单原诊断不变只加粒度关联、发布快照只冻结已批准演化行。
 
 ### 5.2 端到端脚本（对着已启动的服务）
 
 ```bash
-./scripts/verify.sh          # 30 项断言
+./scripts/verify.sh          # 48 项断言
 # 或指定地址
 BASE_URL=http://127.0.0.1:8080 ./scripts/verify.sh
 ```
 
 覆盖：健康/OpenAPI、鉴权与角色、两类机型、同码改义、发生时点语义、保留冲突、可追溯性、
-处置边界、目录固定、发布冻结与哈希、统计口径。
+处置边界、目录固定、发布冻结与哈希、统计口径，以及第 11 节的概念粒度演化（比较层级、趋势标记、
+待归属、未定义子码排除、重开工单解释、演化快照冻结、审批 admin 隔离）。
 
 ---
 
@@ -178,9 +192,19 @@ GET  /api/diagnosis/results/{id}/explain         回查原始来源/定义/审�
 **发布快照（模型 B）**
 ```
 POST /api/releases                               创建草稿（绑定已发布目录 + 库存快照）
-POST /api/releases/{label}/publish               冻结并计算内容哈希
+POST /api/releases/{label}/publish               冻结并计算内容哈希（含已批准演化关系）
 GET  /api/releases | /{label} | /{label}/content
 POST /api/releases/{label}/retire
+```
+
+**概念粒度演化**
+```
+POST /api/evolution/hierarchy | /bridges                     父子边 / 桥接矩阵（PROPOSED）
+POST /api/evolution/hierarchy/{id}/approve | /bridges/{id}/approve   审批（admin）
+GET  /api/evolution/concepts/{a}/compare/{b}                 LCA 比较层级
+POST /api/evolution/trends                                   HIERARCHY/BRIDGE 跨版本趋势
+POST /api/evolution/unattributed/detect                      标记缺固件证据告警
+POST /api/evolution/work-orders/{id}/granularity-links       重开工单关联新粒度
 ```
 
 ### 6.1 诊断运行示例
@@ -220,19 +244,79 @@ curl -u engineer:engineer123 -X POST localhost:8080/api/diagnosis/runs \
 
 ---
 
+## 7.1 概念粒度演化（固件拆分下的趋势连续性）
+
+厂商把"液压压力异常"在 `NW-8 V3.0` 拆成 **低压 / 压力波动 / 传感器失效** 三个细码（外加一个**定义未批准**的子码）。
+系统保留每个版本的概念层级，不靠回填或废弃来制造连续。
+
+### 7.1.1 演化记录模型（V2 迁移）
+
+| 表 | 作用 |
+| --- | --- |
+| `concept_hierarchy` | 父子概念边：固件适用范围（机型/固件序号区间）、关系类型 `SPLIT/MERGE/REFINE`、聚合 `REVERSIBLE/IRREVERSIBLE`、工程依据、审批状态与有效期 |
+| `concept_bridge_matrix` | 工程师批准的桥接矩阵：把来源码按权重折到同一粗粒度概念，含工程依据与审批 |
+| `unattributed_alarm` | 固件证据缺失/窗口歧义的告警，只作"待归属"展示，可在补证后 resolve |
+| `work_order_concept_link` | 重开/历史工单到新粒度概念的**追加式**说明，不改写原诊断 |
+| `release_concept_hierarchy` / `release_concept_bridge` | 发布快照对**已批准**演化关系的冻结（PROPOSED 行不入快照、不入统计） |
+
+只有 `APPROVED` 的层级边/桥接行能进入自动统计；子码没有已批准工程定义时被排除并显式列在报告里。
+
+### 7.1.2 两种连续性策略（由管理口径选择，不强制回填或废弃）
+
+- **层级法 `mode=HIERARCHY`（默认，保留信息）**：沿已批准层级找**最近共同祖先（LCA）**，在祖先口径上连续比较，
+  同时保留祖先内部的**细分分布**。跨版本指标因此可能落在多个层次，并带 `IRREVERSIBLE_AGGREGATION_PRESENT`、
+  `FINE_DISTRIBUTION_SHIFT` 等标记。
+- **桥接法 `mode=BRIDGE`（报表稳定，牺牲细节）**：用工程师批准的桥接矩阵把所有码折到同一粗概念，
+  趋势稳定但细类内部变化被 `FINE_DETAIL_MASKED` 明确掩盖；没有桥接的已定义概念列入 `unbridgedConcepts` 而非臆测。
+
+每次比较都输出三类标记之一：`FINE_GRAINED`（同一 SPLIT 的兄弟细码直接比较）、
+`COMMON_ANCESTOR`（只能在共同祖先层连续）、`NOT_COMPARABLE`（无共同祖先且无桥接）。
+
+### 7.1.3 主要端点
+
+```
+POST /api/evolution/hierarchy                      新建父子概念边（PROPOSED，含固件范围与工程依据）
+POST /api/evolution/hierarchy/{id}/approve|retire  审批（admin）/停用
+GET  /api/evolution/hierarchy?status=APPROVED
+GET  /api/evolution/concepts/{code}/granularity    概念的边、桥接与"未定义子码"告警
+GET  /api/evolution/concepts/{a}/compare/{b}       LCA 比较：FINE_GRAINED/COMMON_ANCESTOR/NOT_COMPARABLE
+POST /api/evolution/bridges  + /{id}/approve|retire  桥接矩阵维护（审批 admin）
+GET  /api/evolution/bridges?status=APPROVED
+POST /api/evolution/unattributed/detect            扫描缺固件证据的告警并标记待归属
+GET  /api/evolution/unattributed?openOnly=true
+POST /api/evolution/unattributed/{id}/resolve      补证后解除待归属
+POST /api/evolution/work-orders/{id}/granularity-links  重开工单关联新粒度说明（原诊断不变）
+POST /api/evolution/trends                         跨版本趋势（HIERARCHY 或 BRIDGE，含比较标记与排除清单）
+```
+
+### 7.1.4 演示数据如何对应验收样例
+
+- **新旧固件交错**：`NW-A01` 升到 V3.0 上送细码，`NW-A02` 留在 V2.0 仍上送旧粗码 `HYD-201`，落在同一统计窗口。
+- **三类故障占比变化**：2026-02 与 2026-03 的低压/波动/传感器失效数量不同，层级法在祖先 `HYD_PRESSURE_ABNORMAL`
+  下保留每月细分分布并标记 `FINE_DISTRIBUTION_SHIFT`；桥接法只给稳定的祖先总数。
+- **子码缺定义**：`HYD-390 → HYD_UNDEFINED_SUB` 只有 PROPOSED 边，统计中进入 `undefinedSubcodes` 被排除。
+- **固件证据缺失**：`NW-A03` 无固件安装窗口，其告警 `ALT-NW-A03-20260321` 进入待归属，不进统计。
+- **历史工单重开**：2024 年工单 `WO-2024-0116-NW` 原诊断保留，追加到 `HYD_PRESSURE_LOW_FINE` 的粒度说明。
+- **快照冻结**：`REL-2026.01` 首次冻结 5 条已批准层级边与 4 条桥接行；旧 release（2025.01/02）不含演化冻结。
+
+---
+
 ## 8. 目录结构
 
 ```
 src/main/java/com/windfarm/faultref/
   config/      SecurityConfig, OpenApiConfig
   domain/      (schema-first；实体以 SQL 表为准)
-  repo/        ReferenceRepo, MappingRepo, CatalogRepo, EvidenceRepo, ReleaseRepo, DiagnosisRepo, Sql
+  repo/        ReferenceRepo, MappingRepo, CatalogRepo, EvidenceRepo, ReleaseRepo,
+               DiagnosisRepo, EvolutionRepo（粒度演化）, Sql
   service/     ReferenceService, MappingService, CatalogService/CatalogAdminService,
-               EvidenceService, DiagnosisService (引擎), DiagnosisQueryService (统计/差异/解释), ReleaseService
+               EvidenceService, DiagnosisService (引擎), DiagnosisQueryService (统计/差异/解释),
+               ReleaseService, EvolutionService (层级/LCA/桥接/趋势/待归属/工单关联)
   seed/        DemoDataSeeder（可复现的演示数据与预置运行）
-  web/         6 个 REST 控制器 + dto/
+  web/         7 个 REST 控制器 + dto/（含 EvolutionController）
 src/main/resources/db/migration/V1__schema.sql   Flyway 建表
-scripts/verify.sh                                端到端验证（30 项）
+src/main/resources/db/migration/V2__concept_granularity.sql  概念粒度演化表与快照冻结表
+scripts/verify.sh                                端到端验证（48 项）
 Dockerfile / docker-compose.yml                  一键启动
 ```
 
@@ -240,10 +324,19 @@ Dockerfile / docker-compose.yml                  一键启动
 
 ## 9. 已执行的验证结论（如实记录）
 
-- `mvn test`：24/24 通过（`DiagnosisScenarioTest` 10、`ReleaseSnapshotTest` 6、`ApiContractTest` 8），运行于独立库 `faultref_test`。
-- `./scripts/verify.sh`：30/30 通过（对着本地启动的服务）。
-- `mvn package` 产出的 `faultref-1.0.0.jar` 也曾以 `java -jar` 方式启动并跑通同一套 30 项验证。
-- Docker / Docker Compose 未在本容器内执行（容器无 Docker daemon）；`Dockerfile` 与 `docker-compose.yml` 已提供，构建逻辑为 `mvn package` + Temurin 21 JRE 运行。
-- 手工确认的关键输出：`HYD-201` 在 V2.1 解析为 `HYD_PUMP_WEAR`、V1.0 解析为 `HYD_LOW_PRESSURE`；
-  2024 补传告警在 `AS_OF` 复演中仍为 `HYD_LOW_PRESSURE`；`振动超限` 在 `HX-6` 为 `CONFLICT`、
-  在 `NW-8` 经裁定为 `GEARBOX_VIBRATION_HIGH`；2025-06 双泵库存下结论为 `PENDING_ENGINEER`。
+- `mvn test`：32/32 通过（`DiagnosisScenarioTest` 10、`ReleaseSnapshotTest` 6、`ApiContractTest` 8、
+  `GranularityEvolutionTest` 8），运行于独立库 `faultref_test`，Flyway 自动执行 V1+V2 迁移。
+- `./scripts/verify.sh`：48/48 通过（对着本地启动的服务，含 18 项概念粒度演化断言）。
+- 手工确认的关键输出：
+  - `HYD-201` 在 V2.1 解析为 `HYD_PUMP_WEAR`、V1.0 解析为 `HYD_LOW_PRESSURE`；
+    2024 补传告警在 `AS_OF` 复演中仍为 `HYD_LOW_PRESSURE`；`振动超限` 在 `HX-6` 为 `CONFLICT`、
+    在 `NW-8` 经裁定为 `GEARBOX_VIBRATION_HIGH`；2025-06 双泵库存下结论为 `PENDING_ENGINEER`。
+  - 粒度比较：两个 SPLIT 兄弟细码 → `FINE_GRAINED`；旧粗类对新细类 → `COMMON_ANCESTOR`；
+    无共同祖先概念 → `NOT_COMPARABLE`。
+  - 层级趋势在共同祖先 `HYD_PRESSURE_ABNORMAL` 下保留每月细分分布并标记 `FINE_DISTRIBUTION_SHIFT`；
+    桥接趋势只输出稳定祖先总数并标记 `FINE_DETAIL_MASKED`。
+  - `HYD_UNDEFINED_SUB`（无已批准定义）进入 `undefinedSubcodes` 被排除；`ALT-NW-A03-20260321`
+    （无固件证据）进入待归属；重开工单 `WO-2024-0116-NW` 原诊断不变、仅追加粒度关联。
+  - `REL-2026.01` 冻结 5 条已批准层级边与 4 条桥接行；`REL-2025.01/02` 的演化冻结为空。
+- `mvn package` 产出的 `faultref-1.0.0.jar` 也曾以 `java -jar` 方式启动并跑通同一套验证（基线结论；本批次以 `mvn spring-boot:run` 复验）。
+- Docker / Docker Compose 未在本容器内执行（容器无 Docker daemon）；`Dockerfile` 与 `docker-compose.yml` 已提供，构建逻辑为 `mvn package` + Temurin JRE 运行。

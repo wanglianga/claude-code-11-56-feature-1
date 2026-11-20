@@ -224,4 +224,57 @@ public final class ApiRequests {
 
     public record ReleasePublish(@NotBlank String approvedBy, @NotBlank String approvalRef) {
     }
+
+    // ---- concept granularity evolution ---------------------------------
+    public record HierarchyCreate(
+            @NotBlank String parentConceptCode,
+            @NotBlank String childConceptCode,
+            @NotBlank @Pattern(regexp = "SPLIT|MERGE|REFINE") String relationshipType,
+            @NotBlank @Pattern(regexp = "REVERSIBLE|IRREVERSIBLE") String aggregationKind,
+            String manufacturerCode,
+            String modelCode,
+            String firmwareFrom,
+            String firmwareTo,
+            @NotBlank String engineeringBasis,
+            Instant validFrom,
+            Instant validTo) {
+    }
+
+    public record HierarchyApprove(@NotBlank String approvedBy, @NotBlank String approvalRef) {
+    }
+
+    public record BridgeCreate(
+            @NotBlank String matrixCode,
+            @NotBlank String sourceConceptCode,
+            @NotBlank String targetConceptCode,
+            String manufacturerCode,
+            String modelCode,
+            String firmwareFrom,
+            String firmwareTo,
+            Double weight,
+            @NotBlank String engineeringBasis,
+            Instant validFrom,
+            Instant validTo) {
+    }
+
+    public record BridgeApprove(@NotBlank String approvedBy, @NotBlank String approvalRef) {
+    }
+
+    public record UnattributedResolve(@NotBlank String resolutionNote) {
+    }
+
+    public record WorkOrderLinkCreate(
+            @NotBlank String conceptCode,
+            String linkType,
+            @NotBlank String note) {
+    }
+
+    public record TrendRequest(
+            List<UUID> runIds,
+            Instant from,
+            Instant to,
+            String period,
+            @Pattern(regexp = "BRIDGE|HIERARCHY") String mode,
+            String conceptCode) {
+    }
 }

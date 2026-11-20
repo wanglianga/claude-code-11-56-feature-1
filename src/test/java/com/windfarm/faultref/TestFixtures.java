@@ -4,6 +4,7 @@ import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.service.CatalogAdminService;
 import com.windfarm.faultref.service.CatalogService;
 import com.windfarm.faultref.service.EvidenceService;
+import com.windfarm.faultref.service.EvolutionService;
 import com.windfarm.faultref.service.MappingService;
 import com.windfarm.faultref.service.ReferenceService;
 import com.windfarm.faultref.service.ReleaseService;
@@ -36,6 +37,8 @@ public class TestFixtures {
     private EvidenceService evidence;
     @Autowired
     private ReleaseService releases;
+    @Autowired
+    private EvolutionService evolution;
 
     @PostConstruct
     void assertWiring() {
@@ -168,5 +171,38 @@ public class TestFixtures {
 
     public ReleaseService releaseService() {
         return releases;
+    }
+
+    // ---- concept granularity evolution ---------------------------------
+    public UUID hierarchy(String parent, String child, String relationship, String aggregation,
+                          String manufacturer, String model, String basis) {
+        return evolution.createHierarchy(new ApiRequests.HierarchyCreate(parent, child,
+                relationship, aggregation, manufacturer, model, null, null, basis,
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+    }
+
+    public UUID approveHierarchy(String parent, String child, String relationship, String aggregation,
+                                 String manufacturer, String model, String basis, String approvalRef) {
+        UUID id = hierarchy(parent, child, relationship, aggregation, manufacturer, model, basis);
+        evolution.approveHierarchy(id, "approver", approvalRef);
+        return id;
+    }
+
+    public UUID bridge(String matrix, String source, String target, String manufacturer, String model,
+                       double weight, String basis) {
+        return evolution.createBridge(new ApiRequests.BridgeCreate(matrix, source, target,
+                manufacturer, model, null, null, weight, basis,
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+    }
+
+    public UUID approveBridge(String matrix, String source, String target, String manufacturer,
+                              String model, double weight, String basis, String approvalRef) {
+        UUID id = bridge(matrix, source, target, manufacturer, model, weight, basis);
+        evolution.approveBridge(id, "approver", approvalRef);
+        return id;
+    }
+
+    public EvolutionService evolution() {
+        return evolution;
     }
 }

@@ -57,7 +57,7 @@ say "2. Two turbine types and firmware timeline are present"
 units=$(get /api/reference/units | jq -r '[.[].manufacturerCode] | unique | join(",")')
 expect_eq "alarm sources cover both manufacturers" "$units" "HAIXIN,NORDWIND"
 fw=$(get /api/reference/firmware | jq -r '[.[] | select(.modelCode=="NW-8") | .version] | join(",")')
-expect_eq "NW-8 firmware timeline" "$fw" "V1.0,V2.0,V2.1"
+expect_eq "NW-8 firmware timeline" "$fw" "V1.0,V2.0,V2.1,V3.0"
 
 # run_containing_alarm <alarmExternalId> [mode] -> prints a run id and its full body on stderr
 run_containing_alarm() {
@@ -148,6 +148,73 @@ expect_true "statistics report backfilled alarms" \
   "$(echo "$stats" | jq -r '.boundaries.offlineBackfilled > 0')"
 expect_true "statistics report the concept distribution" \
   "$(echo "$stats" | jq -r '.concepts | length > 0')"
+
+# ---------------------------------------------------------------------
+say "11. Concept granularity evolution across the V3.0 hydraulic split"
+approved_edges=$(get '/api/evolution/hierarchy?status=APPROVED' | jq 'length')
+expect_true "approved hierarchy edges are frozen ($approved_edges)" "$([ "$approved_edges" -ge 5 ] && echo true || echo false)"
+
+fine_cmp=$(get '/api/evolution/concepts/HYD_PRESSURE_LOW_FINE/compare/HYD_PRESSURE_FLUCTUATION')
+expect_eq "split siblings compare at fine level" "$(echo "$fine_cmp" | jq -r .comparisonKind)" "FINE_GRAINED"
+expect_eq "fine-level comparison reports the common ancestor" \
+  "$(echo "$fine_cmp" | jq -r .commonAncestorCode)" "HYD_PRESSURE_ABNORMAL"
+
+coarse_cmp=$(get '/api/evolution/concepts/HYD_LOW_PRESSURE/compare/HYD_SENSOR_FAILURE')
+expect_eq "old coarse vs new fine is a common-ancestor comparison" \
+  "$(echo "$coarse_cmp" | jq -r .comparisonKind)" "COMMON_ANCESTOR"
+
+disjoint=$(get '/api/evolution/concepts/HYD_OIL_TEMP_HIGH/compare/HYD_SENSOR_FAILURE')
+expect_eq "unrelated concepts are flagged not comparable" \
+  "$(echo "$disjoint" | jq -r .comparisonKind)" "NOT_COMPARABLE"
+
+pending=$(get '/api/evolution/unattributed?openOnly=true')
+expect_eq "missing firmware evidence stays pending attribution" \
+  "$(echo "$pending" | jq -r '.[0].alarmExternalId')" "ALT-NW-A03-20260321"
+
+undefined=$(get '/api/evolution/concepts/HYD_UNDEFINED_SUB/granularity')
+expect_eq "subcode without approved definition is warned" \
+  "$(echo "$undefined" | jq -r '.undefinedChildWarnings[0].warning')" "SUBCODE_WITHOUT_APPROVED_DEFINITION"
+
+# A fresh diagnosis run over the interleaved 2026 firmware window.
+evo_run=$(post /api/diagnosis/runs "$ENGINEER" \
+  '{"mode":"ASSERTION","basis":"LATEST","from":"2026-01-01T00:00:00Z","to":"2026-04-01T00:00:00Z"}' \
+  | jq -r .id)
+
+hier_trend=$(post /api/evolution/trends "$ENGINEER" \
+  "{\"runIds\":[\"$evo_run\"],\"period\":\"MONTH\",\"mode\":\"HIERARCHY\",\"conceptCode\":\"HYD_PRESSURE_ABNORMAL\"}")
+expect_eq "hierarchy trend compares at common ancestor" \
+  "$(echo "$hier_trend" | jq -r '.series[0].comparisonKind')" "COMMON_ANCESTOR"
+expect_true "hierarchy trend keeps the fine-code distribution" \
+  "$(echo "$hier_trend" | jq -r '.series[0].fineDetailMasked == false')"
+expect_true "hierarchy trend marks the fine distribution shift" \
+  "$(echo "$hier_trend" | jq -r 'any(.series[0].markers[]; .marker=="FINE_DISTRIBUTION_SHIFT")')"
+expect_eq "undefined subcode is excluded from hierarchy statistics" \
+  "$(echo "$hier_trend" | jq -r '.undefinedSubcodes[0].conceptCode')" "HYD_UNDEFINED_SUB"
+expect_eq "pending-attribution alarm is excluded and listed" \
+  "$(echo "$hier_trend" | jq -r '.unattributedAlarms[0].alarmExternalId')" "ALT-NW-A03-20260321"
+
+bridge_trend=$(post /api/evolution/trends "$ENGINEER" \
+  "{\"runIds\":[\"$evo_run\"],\"period\":\"MONTH\",\"mode\":\"BRIDGE\"}")
+expect_true "bridge trend rolls onto one stable coarse series" \
+  "$(echo "$bridge_trend" | jq -r 'any(.series[]; .seriesKey=="HYD_PRESSURE_ABNORMAL" and .fineDetailMasked==true)')"
+expect_true "bridge trend states that fine detail is masked" \
+  "$(echo "$bridge_trend" | jq -r 'any(.series[].markers[]; .marker=="FINE_DETAIL_MASKED")')"
+
+wo_id=$(get /api/evidence/work-orders | jq -r '.[] | select(.external_id=="WO-2024-0116-NW") | .id')
+wo_link=$(get "/api/evidence/work-orders/$wo_id" | jq -r '.granularityLinks[0].conceptCode')
+expect_eq "reopened work order keeps original diagnosis and gains granularity link" "$wo_link" "HYD_PRESSURE_LOW_FINE"
+
+rel_evo=$(get /api/releases/REL-2026.01/content)
+expect_eq "new release freezes the approved hierarchy edges" \
+  "$(echo "$rel_evo" | jq -r '.conceptHierarchy | length')" "5"
+expect_eq "new release freezes the approved bridge matrix" \
+  "$(echo "$rel_evo" | jq -r '.conceptBridges | length')" "4"
+
+proposed_id=$(get '/api/evolution/hierarchy?status=PROPOSED' | jq -r '.[0].id')
+approve_code=$(curl -sS -o /dev/null -w '%{http_code}' -u "$ENGINEER" -X POST \
+  "$BASE_URL/api/evolution/hierarchy/$proposed_id/approve" \
+  -H 'Content-Type: application/json' -d '{"approvedBy":"x","approvalRef":"Y"}')
+expect_eq "engineer cannot approve a hierarchy edge (admin only)" "$approve_code" "403"
 
 # ---------------------------------------------------------------------
 printf '\n================ RESULT ================\n'

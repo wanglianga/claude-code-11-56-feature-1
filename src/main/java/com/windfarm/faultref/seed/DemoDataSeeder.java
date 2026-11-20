@@ -7,6 +7,7 @@ import com.windfarm.faultref.service.CatalogAdminService;
 import com.windfarm.faultref.service.CatalogService;
 import com.windfarm.faultref.service.DiagnosisService;
 import com.windfarm.faultref.service.EvidenceService;
+import com.windfarm.faultref.service.EvolutionService;
 import com.windfarm.faultref.service.MappingService;
 import com.windfarm.faultref.service.ReferenceService;
 import com.windfarm.faultref.service.ReleaseService;
@@ -61,12 +62,14 @@ public class DemoDataSeeder implements ApplicationRunner {
     private final EvidenceService evidence;
     private final ReleaseService releases;
     private final DiagnosisService diagnosis;
+    private final EvolutionService evolution;
 
     public DemoDataSeeder(NamedParameterJdbcTemplate jdbc, ReferenceRepo reference,
                           ReferenceService referenceService, MappingService mappingService,
                           CatalogRepo catalog, CatalogService catalogService,
                           CatalogAdminService catalogAdmin, EvidenceService evidence,
-                          ReleaseService releases, DiagnosisService diagnosis) {
+                          ReleaseService releases, DiagnosisService diagnosis,
+                          EvolutionService evolution) {
         this.jdbc = jdbc;
         this.reference = reference;
         this.referenceService = referenceService;
@@ -77,6 +80,7 @@ public class DemoDataSeeder implements ApplicationRunner {
         this.evidence = evidence;
         this.releases = releases;
         this.diagnosis = diagnosis;
+        this.evolution = evolution;
     }
 
     @Override
@@ -450,9 +454,180 @@ public class DemoDataSeeder implements ApplicationRunner {
         releases.publish("REL-2025.02", "周工", "REL-APPROVE-2025-02");
 
         // ---------------------------------------------------------------
+        // Concept granularity evolution: V3.0 splits one hydraulic fault
+        // into three fine codes (+ one subcode kept without an approved
+        // engineering definition). Old releases stay untouched; the new
+        // REL-2026.01 freezes this evolution for the first time.
+        // ---------------------------------------------------------------
+        seedGranularityEvolution();
+
+        // ---------------------------------------------------------------
         // Seeded runs
         // ---------------------------------------------------------------
         seedRuns();
+    }
+
+    // ------------------------------------------------------------------
+    // Concept granularity evolution narrative (V3.0 three-way split)
+    // ------------------------------------------------------------------
+    private void seedGranularityEvolution() {
+        // New firmware V3.0 on NW-8. NW-A01 upgrades; NW-A02 stays on V2.0 so
+        // old and new firmware evidence interleave in the same trend window.
+        referenceService.createFirmware(new ApiRequests.FirmwareCreate("NORDWIND", "NW-8", "V3.0", 4,
+                LocalDate.of(2026, 1, 15),
+                "Hydraulic pressure abnormal split into low pressure / fluctuation / sensor failure"));
+        referenceService.installFirmware("NW-A01", new ApiRequests.FirmwareInstall("NW-A01", "V3.0",
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+        // NW-A03 is commissioned but never reports a firmware install window.
+        referenceService.createUnit(new ApiRequests.UnitCreate("NW-A03", "北区 A03", "NORDWIND", "NW-8",
+                LocalDate.of(2026, 1, 20)));
+
+        referenceService.createSourceCode(new ApiRequests.SourceCodeCreate("NORDWIND_CTRL", "HYD-310",
+                "Hydraulic pressure low (fine)", "液压压力低-细类"));
+        referenceService.createSourceCode(new ApiRequests.SourceCodeCreate("NORDWIND_CTRL", "HYD-320",
+                "Hydraulic pressure fluctuation", "液压压力波动"));
+        referenceService.createSourceCode(new ApiRequests.SourceCodeCreate("NORDWIND_CTRL", "HYD-330",
+                "Hydraulic pressure sensor failure", "液压压力传感器失效"));
+        referenceService.createSourceCode(new ApiRequests.SourceCodeCreate("NORDWIND_CTRL", "HYD-390",
+                "Hydraulic pressure abnormal (uncategorised fine code)", "未定义液压压力细类"));
+
+        // Umbrella concept + three approved fine concepts + one subcode whose
+        // engineering definition is deliberately left unapproved.
+        createConcept("HYD_PRESSURE_ABNORMAL", "液压压力异常", "HYDRAULIC", "HIGH",
+                "液压压力相关异常的共同祖先概念，用于跨固件版本的连续比较。",
+                "李工", "MOC-2026-001", "2026-01-10T00:00:00Z");
+        createConcept("HYD_PRESSURE_LOW_FINE", "液压压力低（细类）", "HYDRAULIC", "HIGH",
+                "主回路压力持续低于 120 bar；V3.0 从原液压压力异常中拆出，可按工程依据回卷到共同祖先。",
+                "李工", "MOC-2026-002", "2026-01-10T00:00:00Z");
+        createConcept("HYD_PRESSURE_FLUCTUATION", "液压压力波动", "HYDRAULIC", "MEDIUM",
+                "压力在 30 秒内波动幅度超过 15 bar；旧固件无对应采集量，折回旧类会丢失信息，聚合不可逆。",
+                "李工", "MOC-2026-003", "2026-01-10T00:00:00Z");
+        createConcept("HYD_SENSOR_FAILURE", "液压压力传感器失效", "HYDRAULIC", "HIGH",
+                "压力传感器自检失败或信号超量程；属传感器本体故障，折回压力异常不可逆。",
+                "李工", "MOC-2026-004", "2026-01-10T00:00:00Z");
+        createConcept("HYD_UNDEFINED_SUB", "液压压力未定义细类", "HYDRAULIC", "HIGH",
+                "控制器已上送但工程定义尚未批准的细类，禁止进入自动统计。",
+                "李工", "MOC-2026-005", "2026-01-10T00:00:00Z");
+
+        // V3.0 firmware-scoped assertions for the fine codes.
+        UUID hyd310 = sourceCodeId("NORDWIND_CTRL", "HYD-310");
+        UUID hyd320 = sourceCodeId("NORDWIND_CTRL", "HYD-320");
+        UUID hyd330 = sourceCodeId("NORDWIND_CTRL", "HYD-330");
+        UUID hyd390 = sourceCodeId("NORDWIND_CTRL", "HYD-390");
+        assertCode(hyd310, "HYD_PRESSURE_LOW_FINE", 1, "NORDWIND", "NW-8", "V3.0", null,
+                "MOC-2026-010", "李工", "2026-01-15T00:00:00Z");
+        assertCode(hyd320, "HYD_PRESSURE_FLUCTUATION", 1, "NORDWIND", "NW-8", "V3.0", null,
+                "MOC-2026-011", "李工", "2026-01-15T00:00:00Z");
+        assertCode(hyd330, "HYD_SENSOR_FAILURE", 1, "NORDWIND", "NW-8", "V3.0", null,
+                "MOC-2026-012", "李工", "2026-01-15T00:00:00Z");
+        assertCode(hyd390, "HYD_UNDEFINED_SUB", 1, "NORDWIND", "NW-8", "V3.0", null,
+                "MOC-2026-013", "李工", "2026-01-15T00:00:00Z");
+
+        // ---- approved hierarchy: firmware applicability + aggregation kind
+        approveHierarchy("HYD_PRESSURE_ABNORMAL", "HYD_LOW_PRESSURE", "REFINE", "REVERSIBLE",
+                "V1.0-V2.x 的粗类在 V3.0  umbrella 下保留为可回卷概念",
+                "MOC-2026-020", "李工");
+        approveHierarchy("HYD_PRESSURE_ABNORMAL", "HYD_PRESSURE_LOW_FINE", "SPLIT", "REVERSIBLE",
+                "低压细类与旧粗类口径一致，可按共同祖先连续比较",
+                "MOC-2026-021", "李工");
+        approveHierarchy("HYD_PRESSURE_ABNORMAL", "HYD_PRESSURE_FLUCTUATION", "SPLIT", "IRREVERSIBLE",
+                "波动为 V3.0 新增采集量，旧固件无法重建，聚合不可逆",
+                "MOC-2026-022", "李工");
+        approveHierarchy("HYD_PRESSURE_ABNORMAL", "HYD_SENSOR_FAILURE", "SPLIT", "IRREVERSIBLE",
+                "传感器本体故障在旧码中混于压力异常，拆分后无法由旧记录还原",
+                "MOC-2026-023", "李工");
+        approveHierarchy("HYD_PRESSURE_ABNORMAL", "HYD_PUMP_WEAR", "REFINE", "IRREVERSIBLE",
+                "V2.1 泵磨损细化与 V3.0 压力细类口径不同，仅在 umbrella 层可比",
+                "MOC-2026-024", "李工");
+        // The undefined subcode gets a PROPOSED edge that is never approved.
+        evolution.createHierarchy(new ApiRequests.HierarchyCreate("HYD_PRESSURE_ABNORMAL",
+                "HYD_UNDEFINED_SUB", "SPLIT", "IRREVERSIBLE", "NORDWIND", "NW-8", "V3.0", null,
+                "待补充工程依据：定义未批准前不得用于统计",
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+
+        // ---- engineer-approved bridge matrix: stable coarse continuity
+        String matrix = "HYD-PRESSURE-BRIDGE";
+        approveBridge(matrix, "HYD_LOW_PRESSURE", "HYD_PRESSURE_ABNORMAL", 1.0,
+                "旧粗类整体并入 umbrella 口径", "MOC-2026-030");
+        approveBridge(matrix, "HYD_PRESSURE_LOW_FINE", "HYD_PRESSURE_ABNORMAL", 1.0,
+                "低压细类回卷到共同祖先", "MOC-2026-031");
+        approveBridge(matrix, "HYD_PRESSURE_FLUCTUATION", "HYD_PRESSURE_ABNORMAL", 1.0,
+                "波动按管理指标口径折入 umbrella（接受细类信息被掩盖）", "MOC-2026-032");
+        approveBridge(matrix, "HYD_SENSOR_FAILURE", "HYD_PRESSURE_ABNORMAL", 1.0,
+                "传感器失效折入 umbrella（接受细类信息被掩盖）", "MOC-2026-033");
+        // HYD_UNDEFINED_SUB intentionally has NO bridge: unbridged in BRIDGE mode.
+
+        // ---- interleaved alarms: old firmware coarse vs V3.0 fine codes
+        // 2026-02 window: low pressure dominates.
+        ingestFineAlarm("ALT-NW-A01-20260205-310", "NW-A01", "HYD-310", "2026-02-05T08:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260212-310", "NW-A01", "HYD-310", "2026-02-12T08:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260218-320", "NW-A01", "HYD-320", "2026-02-18T09:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260222-330", "NW-A01", "HYD-330", "2026-02-22T07:30:00Z");
+        // NW-A02 still on V2.0: the same fault family arrives as the old coarse code.
+        ingestAlarm(new ApiRequests.AlarmCreate("ALT-NW-A02-20260220", "NW-A02", "NORDWIND_CTRL",
+                "HYD-201", null, null, null,
+                Instant.parse("2026-02-20T10:00:00Z"), Instant.parse("2026-02-20T10:00:10Z"),
+                "REALTIME", Map.of("operatingMode", "POWER_PRODUCTION"), null));
+
+        // 2026-03 window: fluctuation/sensor shares rise; one undefined subcode appears.
+        ingestFineAlarm("ALT-NW-A01-20260303-310", "NW-A01", "HYD-310", "2026-03-03T08:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260306-320", "NW-A01", "HYD-320", "2026-03-06T08:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260313-320", "NW-A01", "HYD-320", "2026-03-13T11:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260320-320", "NW-A01", "HYD-320", "2026-03-20T06:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260309-330", "NW-A01", "HYD-330", "2026-03-09T09:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260323-330", "NW-A01", "HYD-330", "2026-03-23T14:00:00Z");
+        ingestFineAlarm("ALT-NW-A01-20260328-390", "NW-A01", "HYD-390", "2026-03-28T12:00:00Z");
+        ingestAlarm(new ApiRequests.AlarmCreate("ALT-NW-A02-20260315", "NW-A02", "NORDWIND_CTRL",
+                "HYD-201", null, null, null,
+                Instant.parse("2026-03-15T10:00:00Z"), Instant.parse("2026-03-15T10:00:10Z"),
+                "REALTIME", Map.of("operatingMode", "POWER_PRODUCTION"), null));
+
+        // Missing firmware evidence: NW-A03 has no install window, so the alarm
+        // can only be shown as pending attribution, never auto-categorised.
+        ingestAlarm(new ApiRequests.AlarmCreate("ALT-NW-A03-20260321", "NW-A03", "NORDWIND_CTRL",
+                "HYD-310", null, null, null,
+                Instant.parse("2026-03-21T05:00:00Z"), Instant.parse("2026-03-21T05:00:09Z"),
+                "REALTIME", Map.of(), Map.of("note", "controller report lacked firmware id")));
+        evolution.detectMissingFirmwareEvidence();
+
+        // Reopened 2024 work order: original diagnosis stays HYD_LOW_PRESSURE;
+        // only a granularity note to the new fine concept is attached.
+        UUID oldWorkOrder = jdbc.queryForObject(
+                "select id from work_order where external_id = :e",
+                Map.of("e", "WO-2024-0116-NW"), UUID.class);
+        evolution.linkWorkOrder(oldWorkOrder, new ApiRequests.WorkOrderLinkCreate(
+                "HYD_PRESSURE_LOW_FINE", "REOPENED_GRANULARITY_NOTE",
+                "工单于 V3.0 拆分发布后重开；原诊断保留为液压系统压力低，仅关联新细类口径说明"),
+                "李工");
+
+        // Freeze the evolution into a new release that reuses the 2025 catalog.
+        releases.createDraft("REL-2026.01", Instant.parse("2026-02-01T00:00:00Z"),
+                "CAT-2025.02", "INV-2025-06-01", "system",
+                "First freeze of the V3.0 hydraulic granularity split and bridge matrix");
+        releases.publish("REL-2026.01", "李工", "REL-APPROVE-2026-01");
+    }
+
+    private void approveHierarchy(String parent, String child, String relationship, String aggregation,
+                                  String basis, String approvalRef, String approver) {
+        UUID id = evolution.createHierarchy(new ApiRequests.HierarchyCreate(parent, child,
+                relationship, aggregation, "NORDWIND", "NW-8", null, null, basis,
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+        evolution.approveHierarchy(id, approver, approvalRef);
+    }
+
+    private void approveBridge(String matrix, String source, String target, double weight,
+                               String basis, String approvalRef) {
+        UUID id = evolution.createBridge(new ApiRequests.BridgeCreate(matrix, source, target,
+                "NORDWIND", "NW-8", null, null, weight, basis,
+                Instant.parse("2026-01-15T00:00:00Z"), null));
+        evolution.approveBridge(id, "李工", approvalRef);
+    }
+
+    private void ingestFineAlarm(String externalId, String unit, String code, String occurredAt) {
+        ingestAlarm(new ApiRequests.AlarmCreate(externalId, unit, "NORDWIND_CTRL",
+                code, null, null, null,
+                Instant.parse(occurredAt), Instant.parse(occurredAt).plusSeconds(10),
+                "REALTIME", Map.of("operatingMode", "POWER_PRODUCTION"), null));
     }
 
     private void seedRuns() {

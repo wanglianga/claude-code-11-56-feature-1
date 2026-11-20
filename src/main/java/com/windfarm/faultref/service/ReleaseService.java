@@ -3,6 +3,7 @@ package com.windfarm.faultref.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.windfarm.faultref.error.ApiException;
 import com.windfarm.faultref.repo.CatalogRepo;
+import com.windfarm.faultref.repo.EvolutionRepo;
 import com.windfarm.faultref.repo.ReferenceRepo;
 import com.windfarm.faultref.repo.ReleaseRepo;
 import com.windfarm.faultref.repo.Sql;
@@ -41,12 +42,15 @@ public class ReleaseService {
     private final ReleaseRepo releases;
     private final ReferenceRepo reference;
     private final CatalogRepo catalog;
+    private final EvolutionRepo evolution;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public ReleaseService(ReleaseRepo releases, ReferenceRepo reference, CatalogRepo catalog) {
+    public ReleaseService(ReleaseRepo releases, ReferenceRepo reference, CatalogRepo catalog,
+                          EvolutionRepo evolution) {
         this.releases = releases;
         this.reference = reference;
         this.catalog = catalog;
+        this.evolution = evolution;
     }
 
     @Transactional
@@ -176,6 +180,9 @@ public class ReleaseService {
 
         // ---- freeze adjudications -------------------------------------
         freezeAdjudications(releaseId);
+
+        // ---- freeze concept granularity evolution ---------------------
+        freezeGranularity(releaseId);
 
         String hash = contentHash(releaseId);
         releases.publish(releaseId, hash, approvedBy, approvalRef);
@@ -407,6 +414,63 @@ public class ReleaseService {
     }
 
     /**
+     * Freeze the approved concept-granularity evolution: only APPROVED edges
+     * and bridge rows are part of a release, mirroring the rule that no
+     * un-approved relation may feed frozen statistics.
+     */
+    private void freezeGranularity(UUID releaseId) {
+        List<SqlParameterSource> hierarchyBatch = new ArrayList<>();
+        for (Map<String, Object> h : evolution.listHierarchy("APPROVED")) {
+            hierarchyBatch.add(new MapSqlParameterSource()
+                    .addValue("releaseId", releaseId)
+                    .addValue("parentCode", ReferenceRepo.asString(h, "parent_concept_code"))
+                    .addValue("childCode", ReferenceRepo.asString(h, "child_concept_code"))
+                    .addValue("relationshipType", ReferenceRepo.asString(h, "relationship_type"))
+                    .addValue("aggregationKind", ReferenceRepo.asString(h, "aggregation_kind"))
+                    .addValue("modelCode", ReferenceRepo.asString(h, "model_code"))
+                    .addValue("firmwareFrom", ReferenceRepo.asString(h, "firmware_from"))
+                    .addValue("firmwareTo", ReferenceRepo.asString(h, "firmware_to"))
+                    .addValue("firmwareFromSeq", ReferenceRepo.asInt(h, "firmware_from_seq"))
+                    .addValue("firmwareToSeq", ReferenceRepo.asInt(h, "firmware_to_seq"))
+                    .addValue("basis", ReferenceRepo.asString(h, "engineering_basis"))
+                    .addValue("status", ReferenceRepo.asString(h, "status"))
+                    .addValue("validFrom", Sql.odt(ReferenceRepo.asInstant(h, "valid_from")))
+                    .addValue("validTo", Sql.odt(ReferenceRepo.asInstant(h, "valid_to")))
+                    .addValue("approvedBy", ReferenceRepo.asString(h, "approved_by"))
+                    .addValue("approvalRef", ReferenceRepo.asString(h, "approval_ref"))
+                    .addValue("approvedAt", Sql.odt(ReferenceRepo.asInstant(h, "approved_at"))));
+        }
+        if (!hierarchyBatch.isEmpty()) {
+            evolution.insertReleaseHierarchy(hierarchyBatch.toArray(new SqlParameterSource[0]));
+        }
+
+        List<SqlParameterSource> bridgeBatch = new ArrayList<>();
+        for (Map<String, Object> b : evolution.listBridges("APPROVED")) {
+            bridgeBatch.add(new MapSqlParameterSource()
+                    .addValue("releaseId", releaseId)
+                    .addValue("matrixCode", ReferenceRepo.asString(b, "matrix_code"))
+                    .addValue("sourceCode", ReferenceRepo.asString(b, "source_concept_code"))
+                    .addValue("targetCode", ReferenceRepo.asString(b, "target_concept_code"))
+                    .addValue("modelCode", ReferenceRepo.asString(b, "model_code"))
+                    .addValue("firmwareFrom", ReferenceRepo.asString(b, "firmware_from"))
+                    .addValue("firmwareTo", ReferenceRepo.asString(b, "firmware_to"))
+                    .addValue("firmwareFromSeq", ReferenceRepo.asInt(b, "firmware_from_seq"))
+                    .addValue("firmwareToSeq", ReferenceRepo.asInt(b, "firmware_to_seq"))
+                    .addValue("weight", Sql.decimal(b.get("weight")))
+                    .addValue("basis", ReferenceRepo.asString(b, "engineering_basis"))
+                    .addValue("status", ReferenceRepo.asString(b, "status"))
+                    .addValue("validFrom", Sql.odt(ReferenceRepo.asInstant(b, "valid_from")))
+                    .addValue("validTo", Sql.odt(ReferenceRepo.asInstant(b, "valid_to")))
+                    .addValue("approvedBy", ReferenceRepo.asString(b, "approved_by"))
+                    .addValue("approvalRef", ReferenceRepo.asString(b, "approval_ref"))
+                    .addValue("approvedAt", Sql.odt(ReferenceRepo.asInstant(b, "approved_at"))));
+        }
+        if (!bridgeBatch.isEmpty()) {
+            evolution.insertReleaseBridge(bridgeBatch.toArray(new SqlParameterSource[0]));
+        }
+    }
+
+    /**
      * Deterministic hash over the frozen *business* content. Surrogate row ids
      * (release_id, id, child foreign keys) are excluded so the same approved
      * inputs always hash identically; verification ids are not content.
@@ -427,6 +491,8 @@ public class ReleaseService {
             content.put("adjudications", canonical(releases.adjudications(releaseId)));
             content.put("codeEntries", canonical(releases.allCodeEntries(releaseId)));
             content.put("termEntries", canonical(releases.allTermEntries(releaseId)));
+            content.put("conceptHierarchy", canonical(evolution.releaseHierarchy(releaseId)));
+            content.put("conceptBridges", canonical(evolution.releaseBridges(releaseId)));
             byte[] canonical = mapper.writer().with(
                     com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                     .writeValueAsBytes(content);

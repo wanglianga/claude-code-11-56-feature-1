@@ -31,10 +31,11 @@ public class DiagnosisQueryService {
     private final CatalogRepo catalog;
     private final ReleaseRepo releases;
     private final DiagnosisService diagnosisService;
+    private final EvolutionService evolution;
 
     public DiagnosisQueryService(DiagnosisRepo diagnosis, EvidenceRepo evidence, MappingRepo mappings,
                                  ReferenceRepo reference, CatalogRepo catalog, ReleaseRepo releases,
-                                 DiagnosisService diagnosisService) {
+                                 DiagnosisService diagnosisService, EvolutionService evolution) {
         this.diagnosis = diagnosis;
         this.evidence = evidence;
         this.mappings = mappings;
@@ -42,6 +43,7 @@ public class DiagnosisQueryService {
         this.catalog = catalog;
         this.releases = releases;
         this.diagnosisService = diagnosisService;
+        this.evolution = evolution;
     }
 
     public List<DiagnosisDtos.RunSummary> listRuns(int limit) {
@@ -295,6 +297,10 @@ public class DiagnosisQueryService {
                                 m.put("termText", ReferenceRepo.asString(t, "term_text")));
                         m.put("termHistory", mappings.assertionsForTerm(termId));
                     }
+                    // Reopened historical work orders keep their original
+                    // diagnosis; this only exposes the new-granularity note.
+                    m.put("granularityLinks", evolution.linksForWorkOrder(
+                            ReferenceRepo.asUuid(w, "id")));
                     return m;
                 })
                 .toList();

@@ -32,6 +32,9 @@ public class OpenApiConfig {
                                 * A diagnosis run pins one catalog/inventory context; mid-run catalog updates never leak
                                   into its results.
                                 * Mutually exclusive dispositions leave a concept PENDING_ENGINEER.
+                                * Concept-granularity evolution records firmware-scoped parent/child splits, reversible
+                                  vs irreversible aggregation and an engineer-approved bridge matrix; cross-version
+                                  trends state whether they compare fine codes, a common ancestor or are not comparable.
                                 """)
                         .contact(new Contact().name("Offshore Wind O&M Platform"))
                         .license(new License().name("Proprietary")))
